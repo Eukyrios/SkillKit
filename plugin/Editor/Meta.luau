@@ -6,17 +6,17 @@
 local Meta = {}
 
 Meta.Categories = {
-	{ name = "Combat", color = Color3.fromRGB(226, 86, 86), types = { "Hitbox", "Projectile", "Grab", "Debris" } },
+	{ name = "Combat", color = Color3.fromRGB(226, 86, 86), types = { "Hitbox", "Projectile", "Grab", "Debris", "Counter" } },
 	{ name = "Animation", color = Color3.fromRGB(160, 110, 240), types = { "Keyframes", "Animation" } },
 	{ name = "Audio", color = Color3.fromRGB(236, 190, 70), types = { "Sound" } },
 	{ name = "Motion", color = Color3.fromRGB(80, 160, 250), types = { "Velocity", "Travel", "Teleport" } },
 	{ name = "Visual", color = Color3.fromRGB(236, 110, 180), types = { "PresetVFX", "Particle", "MeshVisual", "Highlight" } },
-	{ name = "Logic", color = Color3.fromRGB(90, 200, 160), types = { "Tags", "State", "Group" } },
+	{ name = "Logic", color = Color3.fromRGB(90, 200, 160), types = { "Check", "Tags", "State", "Heal", "Meter", "Group" } },
 }
 Meta.FlowColor = Color3.fromRGB(150, 156, 170)
 
 Meta.Badge = {
-	Wait = "W", Branch = "B", Loop = "L", Group = "G", Tags = "#", State = "S",
+	Wait = "W", Branch = "B", Loop = "L", Group = "G", Tags = "#", State = "S", Check = "If", Counter = "Ct", Heal = "+", Meter = "Me",
 	Hitbox = "H", Projectile = "P", Grab = "Gr", Debris = "D",
 	Velocity = "V", Travel = "T", Teleport = "Tp",
 	Animation = "A", Keyframes = "K", Sound = "♪",
@@ -29,6 +29,10 @@ Meta.Describe = {
 	Loop = "repeats its inner nodes",
 	Group = "a bundle of nodes run together",
 	Tags = "number tags: add / subtract / set / check",
+	Check = "runs a branch if every condition passes: in air, jumping, holding the key, aiming at someone, health, a meter",
+	Counter = "for a moment, a hit on you is cancelled: the attacker is stunned and the counter branch runs",
+	Heal = "gives health back (an amount, or % of max health)",
+	Meter = "adds to / sets a game meter (awakening, evasion, ...): your game decides what it means",
 	State = "stun, multipliers, locks, ragdoll, body freeze",
 	Hitbox = "damages what's inside a box, sphere or cylinder",
 	Projectile = "a flying hitbox: speed curve, gravity, homing",
@@ -58,6 +62,16 @@ Meta.Fields = {
 	Branch = { f("target", "branch"), f("mode", "enum", { "Switch", "Continue" }) },
 	Loop = { f("count", "number", nil, "count (0 = forever)"), f("interval", "number"), f("blocking", "bool", nil, "wait for it"), f("nodes", "nodes") },
 	Group = { f("groupId", "text", nil, "saved effect id"), f("nodes", "nodes") },
+	Check = {
+		f("subject", "enum", SUBJECT), f("conds", "conds", nil, "conditions (all must pass)"),
+		f("passBranch", "branch"), f("failBranch", "branch"), f("stopOnFail", "bool", nil, "stop if it fails"), f("mode", "enum", MODE),
+	},
+	Counter = {
+		f("subject", "enum", SUBJECT), f("time", "number", nil, "window (s)"), f("stun", "number", nil, "stun the attacker (s)"),
+		f("counterBranch", "branch"), f("removeOnHit", "bool", nil, "only the first hit"), f("mode", "enum", MODE),
+	},
+	Heal = { f("subject", "enum", SUBJECT), f("amount", "number"), f("percent", "bool", nil, "amount is % of max") },
+	Meter = { f("subject", "enum", SUBJECT), f("meter", "text", nil, "meter name"), f("op", "enum", { "Add", "Subtract", "Set" }), f("value", "number") },
 	Tags = {
 		f("subject", "enum", SUBJECT), f("tag", "text"), f("op", "enum", { "Add", "Subtract", "Set", "Check" }), f("value", "number"),
 		f("time", "number", nil, "expires after"), f("keep", "bool", nil, "keep after death"),
@@ -145,6 +159,21 @@ Meta.Fields = {
 	},
 }
 
+-- "InAir and not Holding and Health >= 0.5"
+function Meta.condsText(conds: any): string
+	local parts = {}
+	for _, c in ipairs(type(conds) == "table" and conds or {}) do
+		local t = (c["not"] and "not " or "") .. tostring(c.what or "?")
+		if c.what == "Health" then
+			t ..= " >= " .. tostring(c.value or 0.5)
+		elseif c.what == "Meter" then
+			t ..= (" %s >= %s"):format(tostring(c.meter or "?"), tostring(c.value or 1))
+		end
+		table.insert(parts, t)
+	end
+	return #parts > 0 and table.concat(parts, " and ") or "(no conditions)"
+end
+
 function Meta.category(nodeType: string): (string, Color3)
 	for _, c in ipairs(Meta.Categories) do
 		if table.find(c.types, nodeType) then
@@ -168,6 +197,8 @@ function Meta.duration(node: any, keyframes: any?): number
 		return a and (a.duration or 0.5) / math.max(node.speed or 1, 0.01) or 0.5
 	elseif t == "Sound" then
 		return node.stopAfter and node.stopAfter > 0 and node.stopAfter or 0.6
+	elseif t == "Counter" then
+		return node.time or 1
 	elseif t == "Loop" then
 		return (node.count or 1) * math.max(node.interval or 0, 0.1)
 	end

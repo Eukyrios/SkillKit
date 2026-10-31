@@ -95,6 +95,17 @@ local EFFECTS: { [string]: string } = {
 	Sphere = "mesh:Sphere", Cylinder = "mesh:Cylinder", Wedge = "mesh:Block", Mesh = "mesh:Sphere", Billboard = "glow",
 }
 
+-- JJS easing (style + direction) -> a SkillKit curve name ("cubicOut", "linear", ...)
+local EASE = { Linear = "linear", Sine = "sine", Quad = "quad", Cubic = "cubic", Exponential = "expo", Back = "back" }
+local function easing(n: any): string
+	local style = EASE[tostring(n["EASING STYLE"] or "Linear")] or "linear"
+	if style == "linear" then
+		return "linear"
+	end
+	local dir = tostring(n["EASING DIRECTION"] or "In")
+	return style .. ((dir == "Out" or dir == "InOut") and dir or "In")
+end
+
 -- slot of a JJS move in a SkillKit character
 local function slotOf(move: any): string
 	local k = move.K_NAME
@@ -222,6 +233,42 @@ local function animFor(id: any): (string, string)
 end
 
 -- one JJS node list -> SkillKit nodes (notes collects everything that didn't map 1:1)
+-- JJS conditions ({ K_NAME, FLIP, AMOUNT }) -> SkillKit Check conditions
+function Jjs.conds(reqs: { any }, notes: { string }, at: string): { any }
+	local out = {}
+	for _, r in ipairs(reqs or {}) do
+		local k = tostring(r.K_NAME)
+		local c: any = nil
+		if k == "AIR" then
+			c = { what = "InAir" }
+		elseif k == "JUMP" then
+			c = { what = "Jumping" }
+		elseif k == "AIM" then
+			c = { what = "Aiming" }
+		elseif k == "HOLD" then
+			c = { what = "Holding" }
+		elseif k == "HP" then
+			local a = tonumber(r.AMOUNT) or 1
+			c = { what = "Health", value = a > 1 and a / 100 or a }
+		elseif k == "ULT" then
+			c = { what = "Meter", meter = "awakened", value = 1 }
+		elseif k == "BAR" then
+			c = { what = "Meter", meter = "awakening", value = tonumber(r.AMOUNT) or 2 }
+		elseif k == "DOMAIN" then
+			c = { what = "Meter", meter = "domain", value = 1 }
+		else
+			table.insert(notes, ("%s: condition %s has no SkillKit equivalent; ignored"):format(at, k))
+		end
+		if c then
+			if r.FLIP == true then
+				c["not"] = true
+			end
+			table.insert(out, c)
+		end
+	end
+	return out
+end
+
 type Ctx = { prefix: string, conds: { [string]: { any } }, chains: { any }? }
 local function convertLine(line: { any }, mult: { dmg: number, kb: number }, notes: { string }, where: string, ctx: Ctx?): { any }
 	local out: { any } = {}
@@ -304,13 +351,11 @@ local function convertLine(line: { any }, mult: { dmg: number, kb: number }, not
 			end
 			local reqs = target and cx.conds[target]
 			if target and reqs and #reqs > 0 then
-				-- JJS only takes this branch when its conditions pass (in air, jumping, holding...). SkillKit can't check
-				-- those yet, so the conditional branch is left out and the unconditional one after it runs instead.
-				local names = {}
-				for _, r in ipairs(reqs) do
-					table.insert(names, (r.FLIP and "not " or "") .. tostring(r.K_NAME))
+				-- JJS only takes this branch when its conditions pass: a Check that switches to it, else the line goes on
+				local conds = Jjs.conds(reqs, notes, at)
+				if #conds > 0 then
+					table.insert(out, { type = "Check", conds = conds, passBranch = cx.prefix .. target, mode = "Switch" })
 				end
-				table.insert(notes, ("%s: branch %s only runs when %s; left out (the next branch runs instead)"):format(at, target, table.concat(names, " + ")))
 			elseif target then
 				table.insert(out, { type = "Branch", target = cx.prefix .. target, mode = "Switch" })
 			end
@@ -340,6 +385,10 @@ local function convertLine(line: { any }, mult: { dmg: number, kb: number }, not
 					transparency = num(n.OPACITY, 0),
 					altTransparency = num(n["ALT OPACITY"], 0),
 					time = math.min(num(n.TIME, 1), 10),
+					moveCurve = easing(n),
+					sizeCurve = easing(n),
+					fadeCurve = easing(n),
+					colorCurve = easing(n),
 				})
 			elseif preset then
 				table.insert(out, {
@@ -487,8 +536,22 @@ local function convertLine(line: { any }, mult: { dmg: number, kb: number }, not
 				p.flipbook = { rows = fb[1], cols = fb[2], fps = num(n["FLIPBOOK FRAMERATE"], 30) }
 			end
 			table.insert(out, p)
-		elseif k == "EVGIB" or k == "HPGIB" or k == "ULTGIB" then
-			table.insert(notes, ("%s: %s gain (%s) is JJS-specific; skipped"):format(at, k == "EVGIB" and "evasion" or (k == "HPGIB" and "health" or "awakening"), tostring(n.AMOUNT)))
+		elseif k == "HPGIB" then
+			table.insert(out, { type = "Heal", subject = lastHit(n) and "lastHit" or "user", amount = num(n.AMOUNT, 5) })
+		elseif k == "ULTGIB" or k == "EVGIB" then
+			table.insert(out, { type = "Meter", meter = k == "ULTGIB" and "awakening" or "evasion", op = "Add", value = num(n.AMOUNT, 5) })
+		elseif k == "COUNTER" then
+			table.insert(out, {
+				type = "Counter",
+				time = math.min(num(n.TIME, 1), 10),
+				stun = math.max(0, num(n.STUN, 1)),
+				counterBranch = brn(n.BRANCH) or brn(n["BRANCH TARGET"]),
+				removeOnHit = n["REMOVE ON HIT"] ~= false,
+				mode = "Switch",
+			})
+			if tostring(n["ATTACK TYPE2"] or "Melee") ~= "Melee" then
+				table.insert(notes, ("%s: counter only for %s attacks in JJS; SkillKit counters every hit"):format(at, tostring(n["ATTACK TYPE2"])))
+			end
 		elseif k == "SKILL" or k == "SPECIAL" then
 			table.insert(notes, ("%s: plays JJS's built-in %q: not available outside JJS; skipped"):format(at, tostring(n.MOVE or n.SPEC)))
 		else
@@ -537,11 +600,14 @@ function Jjs.convert(move: any, prefix: string?): (any, { string })
 		end
 	end
 	if type(data.Req) == "table" and #data.Req > 0 then
-		local names = {}
-		for _, r in ipairs(data.Req) do
-			table.insert(names, (r.FLIP and "not " or "") .. tostring(r.K_NAME))
+		local conds = Jjs.conds(data.Req, notes, pre .. "Default")
+		if #conds > 0 then
+			-- the whole move only runs when its conditions pass
+			table.insert(skill.branches.Default, 1, { type = "Check", conds = conds, stopOnFail = true, mode = "Switch" })
 		end
-		table.insert(notes, ("the move only works when %s; SkillKit doesn't check that"):format(table.concat(names, " + ")))
+	end
+	if prop.NOCANCEL then
+		skill.cancelOnStun = false
 	end
 	if prop.INV then
 		table.insert(skill.branches.Default, 1, { type = "State", category = "Multiplier", sub = { "DamageTaken" }, value = 0, duration = 1 })

@@ -138,6 +138,12 @@ function Preview:placeHere()
 	self:resetPositions()
 end
 
+-- what Check nodes see in the preview (the editor's Dummies menu changes these)
+function Preview:conditions(): any
+	self.cond = self.cond or { inAir = false, jumping = false, holding = false, aiming = true, health = 1, counterHit = true }
+	return self.cond
+end
+
 -- the preview's tags, minus expired ones (kept between plays; Reset clears them)
 function Preview:liveTags(): { [string]: number }
 	self.tags = self.tags or {}
@@ -156,6 +162,7 @@ function Preview:resetPositions(keepTags: boolean?)
 	if not keepTags then
 		self.tags = {}
 		self.tagExpire = {}
+		self.meters = {}
 	end
 	self.ragdolling = {}
 	self.lie = {}
@@ -541,6 +548,82 @@ function Preview:play(skill: any, branchName: string?)
 		self.tagExpire = self.tagExpire or {}
 		self.tagExpire[n.tag] = (n.time and n.time > 0) and (os.clock() + n.time / selfRef.speed) or nil
 		selfRef:emit("tag", ("%s %s: %s -> %s"):format(n.op, n.tag, tostring(before), tostring(v)), n)
+	end
+	-- conditions come from the preview's "pretend" settings (Dummies > Preview conditions)
+	local function condPass(c: any): (boolean, string)
+		local cond = selfRef:conditions()
+		local what = c.what or "InAir"
+		local pass, detail = false, ""
+		if what == "InAir" then
+			pass = cond.inAir
+		elseif what == "Jumping" then
+			pass = cond.jumping
+		elseif what == "Holding" then
+			pass = cond.holding
+		elseif what == "Aiming" then
+			pass = cond.aiming
+		elseif what == "Health" then
+			pass = cond.health >= (c.value or 0.5)
+			detail = (" %d%%"):format(math.floor(cond.health * 100 + 0.5))
+		elseif what == "Meter" then
+			local v = (selfRef.meters or {})[c.meter or "awakening"] or 0
+			pass = v >= (c.value or 1)
+			detail = (" %s=%s"):format(tostring(c.meter), tostring(v))
+		end
+		if c["not"] then
+			pass = not pass
+		end
+		return pass, (c["not"] and "not " or "") .. what .. detail
+	end
+	H.Check = function(n, cursor)
+		local all, parts = true, {}
+		for _, c in ipairs(n.conds or {}) do
+			local ok, text = condPass(c)
+			table.insert(parts, text .. (ok and " yes" or " no"))
+			if not ok then
+				all = false
+			end
+		end
+		selfRef:emit("info", ("check %s -> %s"):format(table.concat(parts, ", "), all and "passed" or "failed"), n)
+		if all then
+			spawnBranch(n.passBranch, n.mode, cursor, n)
+		elseif n.failBranch then
+			spawnBranch(n.failBranch, n.mode, cursor, n)
+		elseif n.stopOnFail then
+			cursor.stopped = true
+		end
+	end
+	H.Counter = function(n, cursor)
+		local m = resolve(n.subject) or caster
+		label(m, ("COUNTER %.1fs"):format(n.time or 1), Color3.fromRGB(255, 200, 90), math.min((n.time or 1) / selfRef.speed, 2))
+		if selfRef:conditions().counterHit then
+			-- pretend the dummy attacks during the window
+			track(function()
+				wait(math.min((n.time or 1) * 0.5, 0.3), cursor)
+				if not r.alive then
+					return
+				end
+				r.lastHit = dummy
+				label(dummy, "COUNTERED", Color3.fromRGB(255, 120, 90), 1)
+				selfRef:emit("hit", "countered Target (pretend attack)", n)
+				spawnBranch(n.counterBranch, n.mode, cursor, n)
+			end)
+		else
+			selfRef:emit("info", ("counter window %.2fs (turn on 'Dummy attacks during counters' to see it trigger)"):format(n.time or 1), n)
+		end
+	end
+	H.Heal = function(n, cursor)
+		local m = resolve(n.subject) or caster
+		label(m, ("+%s%s HP"):format(tostring(n.amount or 0), n.percent and "%" or ""), Color3.fromRGB(110, 230, 140), 1)
+		selfRef:emit("info", ("heal %s for %s%s"):format(m.Name, tostring(n.amount or 0), n.percent and "%" or ""), n)
+	end
+	H.Meter = function(n, cursor)
+		selfRef.meters = selfRef.meters or {}
+		local name = n.meter or "awakening"
+		local before = selfRef.meters[name] or 0
+		local v = n.op == "Set" and (n.value or 0) or before + (n.op == "Subtract" and -(n.value or 0) or (n.value or 0))
+		selfRef.meters[name] = v
+		selfRef:emit("info", ("meter %s: %s -> %s"):format(name, tostring(before), tostring(v)), n)
 	end
 	H.State = function(n, cursor)
 		local m = resolve(n.subject)

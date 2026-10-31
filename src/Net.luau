@@ -1,5 +1,6 @@
 --!strict
--- One RemoteEvent for everything SkillKit sends (server -> client only; casting is the game's business).
+-- One RemoteEvent for everything SkillKit sends (server -> client). Clients only send their input state back
+-- ("Holding", "Aim") for Check nodes; casting itself is the game's business.
 -- Messages: (kind: string, payload: table). Kinds are listed in Client/init.luau.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")

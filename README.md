@@ -50,13 +50,19 @@ local skill = {
 }
 ```
 
+**Check** runs a branch when all its conditions pass: in the air, jumping, holding the skill key, aiming at someone,
+health (fraction of max), or a game meter. Holding needs the game to call `SkillKit.setHolding(true/false)` on the
+client from its input code; aiming is tracked by `initClient`. **Counter** cancels hits on you for a moment, stuns the
+attacker and runs a branch. **Heal** and **Meter** change health and named meters; meters are attributes
+(`SK_Meter_<name>`) unless the adapter's `getMeter` / `setMeter` say otherwise.
+
 Nodes in a branch start in order; only `Wait` advances time. Directions and offsets are `Vector3(right, up, forward)`.
 Every node's props and defaults are listed in `src/Schema.luau`.
 
 | Category | Nodes |
 | --- | --- |
-| Flow | Wait, Branch (Switch / Continue), Loop, Group, Tags, State |
-| Combat | Hitbox, Projectile, Grab, Debris |
+| Flow | Wait, Branch (Switch / Continue), Loop, Group, Check, Tags, State, Heal, Meter |
+| Combat | Hitbox, Projectile, Grab, Debris, Counter |
 | Motion | Velocity, Travel, Teleport |
 | Animation / Audio | Animation (asset), Keyframes (no upload), Sound |
 | Visual | PresetVFX, Particle, MeshVisual, Highlight |
@@ -118,7 +124,7 @@ two toolbar buttons:
 - **Import JJS code**: paste a Jujutsu Shenanigans character code (base64 of zstd JSON, the format documented by
   the open-source libjjs encoder). Each move becomes a skill; timings, hitboxes, velocities, branches, tags, states
   and loops carry over. JJS's own animations, effects and built-in moves can't be used in another game, so they are
-  swapped for the closest built-in ones and every swap is listed in the log.
+  swapped for the closest built-in ones and every swap is listed in the log. Coverage, node by node: [docs/JJS_IMPORT.md](docs/JJS_IMPORT.md).
 
 **SkillKit panel**: install / update SkillKit in the open place, add / remove the test runner (Play runs every node
 type against a dummy; chat `/sk all`, `/sk <Test>`, `/sk log`), drop a breakable test wall, tag the selection
@@ -129,5 +135,5 @@ For a place with no game code, `rojo serve test.project.json` serves SkillKit an
 ## Not included
 
 - Build mode (placing blocks, lights, bounce pads).
-- JJS move conditions (in air, holding the key, ...) and JJS-only nodes (built-in JJS moves, counters, hit cancel,
-  awakening / health gain): the importer lists them in the log instead.
+- JJS's built-in moves (a node that plays JJS's own "Divergent Fist" etc.), and JJS's own animations, sounds and
+  effects: those belong to JJS. The importer swaps them for the closest built-in ones and lists every swap in the log.

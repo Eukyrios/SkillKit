@@ -11,6 +11,7 @@
 --          SkillKit.playEffect(name, cframe)             play a registered Effect group anywhere
 --          SkillKit.debug.dump(userOrPlayer)             the debug log, newest last
 -- Client:  SkillKit.initClient()                         presentation (animations, keyframes, VFX, sound, own motion)
+--          SkillKit.setHolding(bool)                     the skill key is held / released (Check "Holding")
 -- Shared:  SkillKit.Curves, .Registry, .Schema, .Codec, .DebugLog
 local RunService = game:GetService("RunService")
 
@@ -41,6 +42,7 @@ if RunService:IsServer() then
 else
 	local Client = require(script.Client) :: any
 	SkillKit.initClient = Client.init
+	SkillKit.setHolding = Client.setHolding
 	SkillKit.Keyframes = Client.Keyframes
 end
 

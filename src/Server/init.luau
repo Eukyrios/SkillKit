@@ -8,6 +8,10 @@
 --   isBlocking(model) -> bool                   breakBlock(model)
 --   isStunned(model) -> bool                    (cancels the user's cast unless skill.cancelOnStun == false)
 --   canCast(user, skill) -> bool
+--   isHolding(model, cast) -> bool              is the skill key held (Check "Holding"); default: SkillKit.setHolding
+--   aimTarget(model, cast) -> Model?            what the player aims at (Check "Aiming"); default: the client's mouse
+--   heal(model, amount)                         Heal nodes
+--   getMeter(model, name) -> number?  setMeter(model, name, value)   game meters (awakening, evasion, ...)
 --   limits = { maxSpeed, scale = {min,max}, walkSpeed = {min,max}, jumpPower = {min,max}, health = {min,max} }
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
@@ -30,6 +34,8 @@ Server.States = StateStore
 Server.Nodes = Nodes
 
 local adapter: any = nil
+-- what each player's client reports: { holding = bool, aim = Model? } (SkillKit.setHolding / aim tracking)
+Server.input = {} :: { [Player]: { holding: boolean, aim: Model? } }
 local characters: { [string]: any } = {}
 local running: { [Model]: { any } } = {}
 
@@ -124,6 +130,35 @@ local function withDefaults(a: any?): any
 	out.canCast = out.canCast or function()
 		return true
 	end
+	out.isHolding = out.isHolding or function(model)
+		local p = Players:GetPlayerFromCharacter(model)
+		local inp = p and Server.input[p]
+		return (inp and inp.holding) or model:GetAttribute("SK_Holding") == true
+	end
+	out.aimTarget = out.aimTarget or function(model)
+		local p = Players:GetPlayerFromCharacter(model)
+		local inp = p and Server.input[p]
+		local t = inp and inp.aim
+		if t and t.Parent and t ~= model and Rig.alive(t) and out.canHit(model, t) then
+			local a, b = Rig.root(model), Rig.root(t)
+			if a and b and (a.Position - b.Position).Magnitude <= 300 then
+				return t
+			end
+		end
+		return nil
+	end
+	out.heal = out.heal or function(model, amount)
+		local hum = Rig.humanoid(model)
+		if hum and hum.Health > 0 then
+			hum.Health = math.min(hum.MaxHealth, hum.Health + amount)
+		end
+	end
+	out.getMeter = out.getMeter or function(model, name)
+		return tonumber(model:GetAttribute("SK_Meter_" .. tostring(name))) or 0
+	end
+	out.setMeter = out.setMeter or function(model, name, value)
+		model:SetAttribute("SK_Meter_" .. tostring(name), value)
+	end
 	local limits = table.clone(DEFAULT_LIMITS)
 	for k, v in pairs(a.limits or {}) do
 		limits[k] = v
@@ -142,6 +177,19 @@ function Server.init(a: any?)
 		p.CharacterAdded:Connect(function(c)
 			TagStore.onCharacter(p, c)
 		end)
+	end)
+	Players.PlayerRemoving:Connect(function(p)
+		Server.input[p] = nil
+	end)
+	-- the only messages clients send: input state for Check "Holding" / "Aiming"
+	Net.remote().OnServerEvent:Connect(function(p, kind, value)
+		local inp = Server.input[p] or { holding = false }
+		Server.input[p] = inp
+		if kind == "Holding" then
+			inp.holding = value == true
+		elseif kind == "Aim" then
+			inp.aim = (typeof(value) == "Instance" and value:IsA("Model")) and value or nil
+		end
 	end)
 	return Server
 end

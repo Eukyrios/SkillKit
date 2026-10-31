@@ -318,7 +318,7 @@ function App:renameBranch(old: string, new: string)
 	-- fix references
 	local function walk(list: { any })
 		for _, n in ipairs(list) do
-			for _, k in ipairs({ "target", "victimBranch", "finisherBranch", "missBranch", "hitBranch", "expireBranch", "passBranch", "failBranch", "arriveBranch", "grabBranch" }) do
+			for _, k in ipairs({ "target", "victimBranch", "finisherBranch", "missBranch", "hitBranch", "expireBranch", "passBranch", "failBranch", "arriveBranch", "grabBranch", "counterBranch" }) do
 				if n[k] == old and not (n.type == "Travel" and k == "target") then
 					n[k] = new
 				end
@@ -333,6 +333,48 @@ function App:renameBranch(old: string, new: string)
 	end
 	self.branch = new
 	self:changed()
+end
+
+-- a yes / no box before anything is deleted
+function App:confirm(title: string, message: string, yes: string, onYes: () -> ())
+	local body = Ui.modal(title, 420, 170)
+	Ui.text(body, message, { Size = UDim2.new(1, 0, 1, -44), TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = C.dim, TextSize = 14, ZIndex = 63 })
+	Ui.button(body, "Cancel", Ui.closePopup, { AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -150, 1, 0), Size = UDim2.fromOffset(100, 32), ZIndex = 63 })
+	Ui.button(body, yes, function()
+		Ui.closePopup()
+		onYes()
+	end, { AnchorPoint = Vector2.new(1, 1), Position = UDim2.fromScale(1, 1), Size = UDim2.fromOffset(140, 32), ZIndex = 63, BackgroundColor3 = C.bad })
+end
+
+function App:deleteCharacter(entry: any)
+	local id = ChangeHistoryService:TryBeginRecording("Delete SkillKit character")
+	if entry.module and entry.module.Parent then
+		entry.module:Destroy()
+	end
+	if id then
+		ChangeHistoryService:FinishRecording(id, Enum.FinishRecordingOperation.Commit)
+	end
+	if self.slotCtx and self.slotCtx.entry.module == entry.module then
+		self.slotCtx = nil
+	end
+	Tree.invalidate()
+	self:log("info", "deleted character " .. tostring(entry.def.name))
+	self:render()
+end
+
+function App:deleteSkillModule(m: ModuleScript)
+	local id = ChangeHistoryService:TryBeginRecording("Delete SkillKit skill")
+	local name = m.Name
+	m:Destroy()
+	if id then
+		ChangeHistoryService:FinishRecording(id, Enum.FinishRecordingOperation.Commit)
+	end
+	if self.source == m then
+		self.source = nil
+	end
+	Tree.invalidate()
+	self:log("info", "deleted skill " .. name)
+	self:render()
 end
 
 function App:deleteBranch(name: string)
@@ -376,6 +418,16 @@ function App:load(skill: any, source: ModuleScript?, key: string?, readOnly: boo
 	self.dirty = false
 	self.slotCtx = nil
 	self.openExample = nil
+	-- the page to come back to: the list the skill was opened from (callers that know better set self.nav after)
+	local prev = self.nav
+	local parent = { level = "home" }
+	if prev and (prev.level == "skill" or prev.level == "node") then
+		local sk = prev.level == "node" and prev.parent or prev
+		parent = (sk and sk.parent) or parent
+	elseif prev and (prev.level == "character" or prev.level == "group") then
+		parent = prev
+	end
+	self.nav = { level = "skill", parent = parent }
 	self.undoStack = {}
 	self.redoStack = {}
 	self:snapshot()
@@ -708,6 +760,8 @@ function App:open()
 	end)
 	if not self.skill then
 		self:load(self.SK.TestSkills.Combo or newSkill("New skill"), nil, nil, false)
+		self.openExample = "Combo"
+		self.nav = { level = "home" }
 	end
 	-- Space plays / stops while the editor is open (not while typing in a box)
 	UserInputService.InputBegan:Connect(function(input, processed)
@@ -781,16 +835,18 @@ end
 
 -- open a node from the tree: its branch, the Loop / Group chain it sits in, selected and expanded
 function App:jumpTo(branch: string, chain: { any }, node: any)
-	self.leftMode = "nodes"
 	self.branch = branch
 	self.path = table.clone(chain)
-	self.selected = { [node] = true }
-	self.expanded[node] = true
 	if not self.show.left then
 		self.show.left = true
 		self:layout()
 	end
-	self:render()
+	local parent = (self.nav and self.nav.level == "node") and self.nav.parent or self.nav
+	if not parent or parent.level ~= "skill" then
+		parent = { level = "skill", parent = { level = "home" } }
+	end
+	self:go({ level = "node", node = node, parent = parent })
+	self.selected = { [node] = true }
 	task.delay(0.05, function()
 		local f = self.nodeFrames[node]
 		local sc = self.listFrame
@@ -891,7 +947,7 @@ function App:newCharacter()
 	self.treeOpen["c:" .. def.id] = true
 	self.treeOpen.chars = true
 	self:log("info", "made " .. (entry.module :: Instance):GetFullName())
-	self:render()
+	self:go({ level = "character", entry = entry })
 	self:characterWindow(entry)
 end
 
@@ -1155,15 +1211,12 @@ function App:importJjsCharacter(moves: { any }, charName: string?)
 	if recording then
 		ChangeHistoryService:FinishRecording(recording, Enum.FinishRecordingOperation.Commit)
 	end
-	self.treeOpen.chars = true
-	self.treeOpen["c:" .. def.id] = true
-	self.leftMode = "tree"
 	if first then
 		self:load(first.skill, first.module, nil, false)
-		self.leftMode = "tree"
 		for _, e in ipairs(Tree.characters()) do
 			if e.module == cm then
 				self.slotCtx = { entry = e, slot = first.slot }
+				self.nav = { level = "character", entry = e }
 			end
 		end
 	end
@@ -1301,7 +1354,14 @@ function App:renderTop()
 		self:savePrefs()
 		self:renderTop()
 	end)
-	menuButton("Dummies", "Move, reset or look at the preview dummies", function()
+	menuButton("Preview", "The preview dummies, and what Check nodes see", function()
+		local function cond(text: string, key: string)
+			local on = self.preview:conditions()[key] == true
+			return { text = text .. (on and "   (yes)" or "   (no)"), color = on and C.good or C.line, onClick = function()
+				local c = self.preview:conditions()
+				c[key] = not c[key]
+			end }
+		end
 		return {
 			{ text = "Bring dummies in front of me", onClick = function()
 				self.preview:stop()
@@ -1321,15 +1381,24 @@ function App:renderTop()
 			{ text = "Clear effects", onClick = function()
 				self.preview:clear()
 			end },
+			{ header = true, text = "PRETEND (FOR CHECK NODES)" },
+			cond("Caster is in the air", "inAir"),
+			cond("Caster is jumping", "jumping"),
+			cond("Skill key is held", "holding"),
+			cond("Aiming at the dummy", "aiming"),
+			cond("Dummy attacks during counters", "counterHit"),
+			{ text = ("Caster health: %d%%  (click to change)"):format(math.floor(self.preview:conditions().health * 100 + 0.5)), onClick = function()
+				local c = self.preview:conditions()
+				local steps = { 1, 0.5, 0.2 }
+				local i = table.find(steps, c.health) or 1
+				c.health = steps[i % #steps + 1]
+			end },
 		}
 	end)
 	gap()
 
 	-- views
-	b("⇄ Flow", "See how the branches connect", function()
-		self:flowWindow()
-	end)
-	menuButton("View", "Show or hide panels", function()
+	menuButton("View", "Panels and the branch flow view", function()
 		local function item(text: string, on: boolean, fn: () -> ())
 			return { text = text .. (on and "   (on)" or "   (off)"), color = on and C.good or C.line, onClick = fn }
 		end
@@ -1344,11 +1413,9 @@ function App:renderTop()
 		end
 		return {
 			item("Node panel", self.show.left and not self.hidden, flip("left")),
-			item("Tree instead of nodes", self.leftMode == "tree", function()
-				self.leftMode = self.leftMode == "tree" and "nodes" or "tree"
-				self:savePrefs()
-				self:render()
-			end),
+			{ text = "Branch flow (how branches connect)", onClick = function()
+				self:flowWindow()
+			end },
 			item("Timeline", self.show.timeline and not self.hidden, flip("timeline")),
 			item("Log", self.show.log and not self.hidden, flip("log")),
 			{ text = self.hidden and "Show all panels" or "Hide all panels (free the 3D view)", onClick = function()
@@ -1466,6 +1533,95 @@ function App:loadPrefs()
 	end
 end
 
+-- NAVIGATION ---------------------------------------------------------------------------------------------------------------
+-- The left panel is one page at a time, like folders: Home (characters, skills, examples) > a character (its slots) >
+-- a skill (the nodes of a branch) > a node (its settings). "< Back" goes up a level; ◀ ▶ step through the other items
+-- at the same level. self.nav = { level = "home" | "character" | "group" | "skill" | "node", ... }
+function App:go(nav: any)
+	self.nav = nav
+	self.selected = {}
+	Ui.closePopup()
+	self:render()
+end
+
+-- open a skill page from a list; parent is the page to come back to
+function App:openSkillPage(load: () -> (), parent: any)
+	load()
+	self.branch = "Default"
+	self.path = {}
+	self:go({ level = "skill", parent = parent })
+end
+
+-- the skills a page lists, as { text, open = fn, ... } (used for lists and for ◀ ▶ on a skill page)
+function App:skillItems(parent: any): { any }
+	local out = {}
+	if parent.level == "character" then
+		local entry = parent.entry
+		for _, slot in ipairs(Tree.SLOTS) do
+			local name = entry.def.skills[slot]
+			if name then
+				table.insert(out, { key = slot, text = slot, open = function()
+					self:openSlot(entry, slot)
+				end })
+			end
+		end
+	elseif parent.level == "group" then
+		if parent.group == "loose" then
+			local used = {}
+			for _, e in ipairs(Tree.characters()) do
+				for _, nm in pairs(e.def.skills) do
+					used[nm] = true
+				end
+			end
+			for _, m in ipairs(Tree.savedSkills()) do
+				if not used[m.Name] then
+					table.insert(out, { key = m, text = m.Name, module = m, open = function()
+						local s, err = Tree.freshRequire(m)
+						if type(s) == "table" then
+							self:load(s, m, nil, false)
+						else
+							self:log("error", "couldn't load " .. m.Name .. ": " .. tostring(err))
+						end
+					end })
+				end
+			end
+		elseif parent.group == "examples" then
+			local names = {}
+			for name in pairs(self.SK.TestSkills) do
+				table.insert(names, name)
+			end
+			table.sort(names)
+			for _, name in ipairs(names) do
+				table.insert(out, { key = name, text = name, open = function()
+					self:load(self.SK.TestSkills[name], nil, nil, false)
+					self.openExample = name
+				end })
+			end
+		elseif parent.group == "moves" then
+			for _, sk in ipairs(parent.set.skills) do
+				table.insert(out, { key = sk.slot, text = sk.slot, open = function()
+					self:load(sk.skill, parent.set.module, sk.slot, true)
+				end })
+			end
+		end
+	end
+	return out
+end
+
+-- which item of a parent's list is the open skill
+function App:currentSkillKey(parent: any): any
+	if parent.level == "character" then
+		return self.slotCtx and self.slotCtx.slot
+	elseif parent.group == "loose" then
+		return self.source
+	elseif parent.group == "examples" then
+		return self.openExample
+	elseif parent.group == "moves" then
+		return self.sourceKey
+	end
+	return nil
+end
+
 function App:renderLeft()
 	local left = self.left :: Frame
 	local scrollY = self.listFrame and self.listFrame.CanvasPosition.Y or 0
@@ -1473,117 +1629,412 @@ function App:renderLeft()
 	self.nodeFrames = {}
 	Ui.pad(left, 10, 10, 10, 10)
 	Ui.list(left, 6)
-
-	-- branch bar (its first button switches the panel between the node cards and the tree)
-	local bar = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 1 })
-	Ui.list(bar, 6, true)
-	local treeMode = self.leftMode == "tree"
-	local modeB = Ui.button(bar, treeMode and "Nodes" or "Tree", function()
-		self.leftMode = treeMode and "nodes" or "tree"
-		self:savePrefs()
-		self:render()
-	end, { Size = UDim2.fromOffset(54, 30), LayoutOrder = 0, BackgroundColor3 = treeMode and C.accent or C.cardHi })
-	Ui.tip(modeB, treeMode and "Back to the node cards" or "Tree: this skill's branches and nodes, characters and slots, saved skills")
-	if treeMode then
-		Ui.text(bar, "Tree: skill, characters, moves", { Size = UDim2.new(1, -60, 0, 30), LayoutOrder = 1, TextColor3 = C.dim, TextSize = 13 })
-		local holder = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, -36), LayoutOrder = 2 })
-		Tree.render(self, holder)
-		return
+	local nav = self.nav or { level = "skill", parent = { level = "home" } }
+	self.nav = nav
+	if nav.level == "node" and not table.find(self:list(), nav.node) then
+		nav = nav.parent or { level = "skill", parent = { level = "home" } }
+		self.nav = nav
 	end
-	local branchB
-	branchB = Ui.button(bar, self.branch .. " ▼", function()
-		local items = {}
-		for _, nm in ipairs(self:branchNames()) do
-			if self.search == "" or string.find(string.lower(nm), string.lower(self.search), 1, true) then
-				table.insert(items, { text = nm .. " (" .. #self.skill.branches[nm] .. ")", onClick = function()
-					self.branch = nm
-					self.path = {}
-					self.selected = {}
-					self:render()
+
+	-- header: < Back, title, ◀ ▶ -------------------------------------------------------------------------------------------
+	local head = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 1 })
+	local title, back, siblings, here = "", nil, nil, nil
+	if nav.level == "home" then
+		title = "Characters & skills"
+	elseif nav.level == "character" then
+		title = tostring(nav.entry.def.name or nav.entry.def.id)
+		back = { level = "home" }
+		siblings = Tree.characters()
+		for i, e in ipairs(siblings) do
+			if e.module == nav.entry.module then
+				here = i
+			end
+		end
+		siblings = siblings and table.clone(siblings)
+		if siblings then
+			for i, e in ipairs(siblings) do
+				siblings[i] = { go = { level = "character", entry = e } }
+			end
+		end
+	elseif nav.level == "group" then
+		title = nav.title or "Skills"
+		back = { level = "home" }
+	elseif nav.level == "skill" then
+		title = tostring(self.skill and self.skill.name or "?") .. (self.readOnly and "  (read-only)" or "")
+		back = nav.parent
+		local items = self:skillItems(nav.parent or { level = "home" })
+		if #items > 1 then
+			local cur = self:currentSkillKey(nav.parent)
+			siblings = {}
+			for i, it in ipairs(items) do
+				if it.key == cur then
+					here = i
+				end
+				siblings[i] = { open = it.open }
+			end
+		end
+		if #self.path > 0 then
+			-- inside a Loop / Group: back goes out of it
+			back = "inner"
+			title = (self.path[#self.path].name or self.path[#self.path].type) .. "  (inside " .. tostring(self.skill.name) .. ")"
+			siblings = nil
+		end
+	elseif nav.level == "node" then
+		local list = self:list()
+		title = Tree.summary(nav.node)
+		back = nav.parent
+		siblings = {}
+		for i, n in ipairs(list) do
+			if n == nav.node then
+				here = i
+			end
+			siblings[i] = { go = { level = "node", node = n, parent = nav.parent } }
+		end
+	end
+	local x = 0
+	if back then
+		local bb = Ui.button(head, "< Back", function()
+			if back == "inner" then
+				self:back()
+			else
+				self:go(back)
+			end
+		end, { Size = UDim2.fromOffset(62, 30), BackgroundColor3 = C.cardHi })
+		Ui.tip(bb, "Up one level")
+		x = 68
+	end
+	local navW = (siblings and #siblings > 1) and 64 or 0
+	Ui.text(head, title, { Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -x - navW, 1, 0), Font = Ui.FontBold, TextSize = 15, TextTruncate = Enum.TextTruncate.AtEnd })
+	if siblings and #siblings > 1 and here then
+		local function step(d: number)
+			local i = (here - 1 + d) % #siblings + 1
+			local s = siblings[i]
+			if s.go then
+				self:go(s.go)
+			else
+				self:openSkillPage(s.open, nav.parent)
+			end
+		end
+		local p = Ui.button(head, "◀", function()
+			step(-1)
+		end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -32, 0, 0), Size = UDim2.fromOffset(30, 30), TextSize = 12 })
+		local n = Ui.button(head, "▶", function()
+			step(1)
+		end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(30, 30), TextSize = 12 })
+		Ui.tip(p, ("Previous (%d of %d)"):format(here, #siblings))
+		Ui.tip(n, ("Next (%d of %d)"):format(here, #siblings))
+	end
+
+	-- the page's scrolling body
+	local function body(extra: number): ScrollingFrame
+		local sc = Instance.new("ScrollingFrame")
+		sc.BackgroundTransparency = 1
+		sc.BorderSizePixel = 0
+		sc.Size = UDim2.new(1, 0, 1, -(36 + extra))
+		sc.LayoutOrder = 10
+		sc.ScrollBarThickness = 5
+		sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		sc.CanvasSize = UDim2.new()
+		sc.Parent = left
+		Ui.list(sc, 4)
+		self.listFrame = sc
+		task.defer(function()
+			if sc.Parent then
+				sc.CanvasPosition = Vector2.new(0, scrollY)
+			end
+		end)
+		return sc
+	end
+	-- one clickable line in a list page
+	local order = 0
+	local function line(sc: Instance, text: string, opts: any)
+		order += 1
+		local r = Instance.new("TextButton")
+		r.AutoButtonColor = true
+		r.BorderSizePixel = 0
+		r.BackgroundColor3 = opts.selected and C.cardHi or C.card
+		r.Text = ""
+		r.Size = UDim2.new(1, -6, 0, 34)
+		r.LayoutOrder = order
+		r.Parent = sc
+		Ui.corner(r, 6)
+		local stripe = Ui.frame(r, { Size = UDim2.new(0, 4, 1, 0), BackgroundColor3 = opts.color or C.line })
+		Ui.corner(stripe, 2)
+		local rightW = 6
+		for _, bt in ipairs(opts.buttons or {}) do
+			local w = math.max(24, #bt.text * 7 + 10)
+			local b = Ui.button(r, bt.text, bt.onClick, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -rightW, 0.5, 0), Size = UDim2.fromOffset(w, 22), TextSize = 12, BackgroundColor3 = C.field, TextColor3 = bt.color or C.text })
+			if bt.tip then
+				Ui.tip(b, bt.tip)
+			end
+			rightW += w + 4
+		end
+		Ui.text(r, text, { Position = UDim2.fromOffset(14, 2), Size = UDim2.new(1, -14 - rightW, 0, opts.sub and 18 or 30), Font = Ui.FontBold, TextSize = 14, TextColor3 = opts.dim and C.dim or C.text, TextTruncate = Enum.TextTruncate.AtEnd })
+		if opts.sub then
+			Ui.text(r, opts.sub, { Position = UDim2.fromOffset(14, 17), Size = UDim2.new(1, -14 - rightW, 0, 15), TextSize = 12, TextColor3 = C.dim, TextTruncate = Enum.TextTruncate.AtEnd })
+		end
+		if opts.onClick then
+			r.Activated:Connect(opts.onClick)
+		end
+		if opts.tip then
+			Ui.tip(r, opts.tip)
+		end
+		return r
+	end
+	local function del(title: string, message: string, run: () -> (), yes: string?)
+		return { text = "X", color = C.bad, tip = yes or "Delete", onClick = function()
+			self:confirm(title, message, yes or "Delete", run)
+		end }
+	end
+
+	-- HOME: sections you can fold: Characters, Skills, Examples -------------------------------------------------------
+	if nav.level == "home" then
+		local sc = body(0)
+		self.homeOpen = self.homeOpen or { characters = true, skills = true, examples = false }
+		local function section(key: string, label: string, count: number?, color: Color3)
+			order += 1
+			local open = self.homeOpen[key] ~= false
+			local h = Instance.new("TextButton")
+			h.AutoButtonColor = true
+			h.BorderSizePixel = 0
+			h.BackgroundColor3 = C.bg
+			h.Text = ""
+			h.Size = UDim2.new(1, -6, 0, 28)
+			h.LayoutOrder = order
+			h.Parent = sc
+			Ui.corner(h, 6)
+			Ui.text(h, open and "▼" or "▶", { Position = UDim2.fromOffset(8, 0), Size = UDim2.fromOffset(14, 28), TextColor3 = color, TextSize = 11 })
+			Ui.text(h, string.upper(label) .. (count and ("   " .. count) or ""), { Position = UDim2.fromOffset(26, 0), Size = UDim2.new(1, -30, 1, 0), Font = Ui.FontBold, TextSize = 12, TextColor3 = color })
+			local underline = Ui.frame(h, { Position = UDim2.new(0, 8, 1, -2), Size = UDim2.new(1, -16, 0, 1), BackgroundColor3 = color, BackgroundTransparency = 0.6 })
+			local _ = underline
+			h.Activated:Connect(function()
+				self.homeOpen[key] = not open
+				self:renderLeft()
+			end)
+			return open
+		end
+		local function gap()
+			order += 1
+			Ui.frame(sc, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 6), LayoutOrder = order })
+		end
+
+		local chars = Tree.characters()
+		if section("characters", "Characters", #chars, C.good) then
+			for _, entry in ipairs(chars) do
+				local n = 0
+				for _ in pairs(entry.def.skills) do
+					n += 1
+				end
+				line(sc, tostring(entry.def.name or entry.def.id), {
+					sub = ("%d skill(s)"):format(n) .. (entry.err and ("  ·  error: " .. entry.err) or ""),
+					color = C.good,
+					tip = "Open this character",
+					onClick = function()
+						self:go({ level = "character", entry = entry })
+					end,
+					buttons = { del("Delete character " .. tostring(entry.def.name) .. "?", "The character goes; its skills are kept (under Skills). Ctrl+Z in Studio brings it back.", function()
+						self:deleteCharacter(entry)
+					end) },
+				})
+			end
+			line(sc, "+ New character", { color = C.good, dim = true, onClick = function()
+				self:newCharacter()
+			end })
+		end
+		gap()
+		local loose = self:skillItems({ level = "group", group = "loose" })
+		local sets = Tree.gameMoves()
+		if section("skills", "Skills", #loose, C.accent) then
+			line(sc, "Skills (no character)", { sub = ("%d skill(s)"):format(#loose), color = C.accent, onClick = function()
+				self:go({ level = "group", group = "loose", title = "Skills (no character)" })
+			end })
+			for _, set in ipairs(sets) do
+				line(sc, set.name, { sub = ("game moves, read-only  ·  %d"):format(#set.skills), color = C.warn, onClick = function()
+					self:go({ level = "group", group = "moves", set = set, title = set.name .. " (game, read-only)" })
+				end })
+			end
+			line(sc, "+ New skill", { color = C.accent, dim = true, onClick = function()
+				self:load({ name = "New skill", cooldown = 2, branches = { Default = {} } }, nil, nil, false)
+				self:go({ level = "skill", parent = { level = "group", group = "loose", title = "Skills (no character)" } })
+			end })
+		end
+		gap()
+		local exCount = 0
+		for _ in pairs(self.SK.TestSkills) do
+			exCount += 1
+		end
+		if section("examples", "Examples", exCount, C.dim) then
+			for _, it in ipairs(self:skillItems({ level = "group", group = "examples" })) do
+				line(sc, it.text, { color = C.dim, tip = "Open this example (read-only)", onClick = function()
+					self:openSkillPage(it.open, { level = "group", group = "examples", title = "Examples (read-only)" })
 				end })
 			end
 		end
-		Ui.menu(branchB.AbsolutePosition + Vector2.new(0, 32), items, 240)
-	end, { Size = UDim2.new(1, -54 - 3 * 36 - 26, 0, 30), LayoutOrder = 1, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd })
-	local function prompt(title: string, initial: string, onOk: (string) -> ())
-		local body = Ui.modal(title, 360, 130)
-		local box = Ui.input(body, initial, function() end, { ZIndex = 63, Size = UDim2.new(1, 0, 0, 30) })
-		Ui.button(body, "OK", function()
-			local t = box.Text
+		return
+	end
+
+	-- CHARACTER: its slots ------------------------------------------------------------------------------------------------
+	if nav.level == "character" then
+		local entry = nav.entry
+		-- the character's stats as small chips; the whole strip opens the settings (name, stats, keybinds)
+		local info = Instance.new("TextButton")
+		info.AutoButtonColor = true
+		info.BorderSizePixel = 0
+		info.BackgroundColor3 = C.bg
+		info.Text = ""
+		info.Size = UDim2.new(1, 0, 0, 30)
+		info.LayoutOrder = 2
+		info.Parent = left
+		Ui.corner(info, 6)
+		Ui.stroke(info, C.line)
+		local chips = Ui.frame(info, { BackgroundTransparency = 1, Position = UDim2.fromOffset(6, 0), Size = UDim2.new(1, -40, 1, 0) })
+		Ui.list(chips, 4, true)
+		local st = entry.def.stats or {}
+		for i, pair in ipairs({ { "HP", st.health or 100 }, { "Walk", st.walkSpeed or 16 }, { "Sprint", st.sprintSpeed or 24 }, { "Jump", st.jumpPower or 50 } }) do
+			local chip = Ui.frame(chips, { LayoutOrder = i, Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = C.card })
+			Ui.corner(chip, 10)
+			Ui.pad(chip, 7, 7, 0, 0)
+			local label = Ui.text(chip, ("%s %s"):format(pair[1], Ui.fmt(pair[2])), { Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, TextSize = 11, TextColor3 = C.dim })
+			label.Active = false
+		end
+		Ui.text(info, "Edit", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 0, 0), Size = UDim2.fromOffset(30, 30), TextSize = 12, TextColor3 = C.accent, TextXAlignment = Enum.TextXAlignment.Right })
+		Ui.tip(info, "Name, stats and keybinds")
+		info.Activated:Connect(function()
+			self:characterWindow(entry)
+		end)
+		local sc = body(36)
+		for _, slot in ipairs(Tree.SLOTS) do
+			local name = entry.def.skills[slot]
+			local k = entry.def.keys and entry.def.keys[slot]
+			local keyText = k and k.pc and k.pc ~= "" and ("  [" .. k.pc .. "]") or ""
+			local buttons = { { text = "...", tip = "New skill here, put the open skill here, pick a saved one", onClick = function()
+				self:slotMenu(entry, slot)
+			end } }
+			if name then
+				table.insert(buttons, 1, del("Empty slot " .. slot .. "?", name .. " is taken out of the slot; the skill itself is kept.", function()
+					self:assignSlot(entry, slot, nil)
+				end, "Empty the slot"))
+			end
+			line(sc, slot .. keyText, {
+				sub = name or "(empty)",
+				color = name and C.good or C.line,
+				dim = name == nil,
+				selected = self.slotCtx and self.slotCtx.entry.module == entry.module and self.slotCtx.slot == slot,
+				tip = name and "Open this skill" or "Empty: click to fill it",
+				buttons = buttons,
+				onClick = function()
+					if name then
+						self:openSkillPage(function()
+							self:openSlot(entry, slot)
+						end, { level = "character", entry = entry })
+					else
+						self:slotMenu(entry, slot)
+					end
+				end,
+			})
+		end
+		return
+	end
+
+	-- GROUP: a list of skills --------------------------------------------------------------------------------------------
+	if nav.level == "group" then
+		local sc = body(0)
+		local items = self:skillItems(nav)
+		if #items == 0 then
+			Ui.text(sc, "Nothing here yet.", { TextColor3 = C.dim, Size = UDim2.new(1, 0, 0, 30) })
+		end
+		for _, it in ipairs(items) do
+			local buttons = {}
+			if it.module then
+				table.insert(buttons, del("Delete skill " .. it.text .. "?", "Removes ReplicatedStorage.SkillKitSkills." .. it.text .. ". Ctrl+Z in Studio brings it back.", function()
+					self:deleteSkillModule(it.module)
+				end))
+			end
+			line(sc, it.text, { color = nav.group == "examples" and C.dim or (nav.group == "moves" and C.warn or C.accent), tip = "Open this skill", buttons = buttons, onClick = function()
+				self:openSkillPage(it.open, nav)
+			end })
+		end
+		return
+	end
+
+	-- NODE: one node's settings -----------------------------------------------------------------------------------------
+	if nav.level == "node" then
+		local sc = body(0)
+		local list = self:list()
+		local t, idx = 0, 1
+		for i, n in ipairs(list) do
+			if n == nav.node then
+				idx = i
+				break
+			end
+			if n.type == "Wait" then
+				t += n.time or 0
+			end
+		end
+		self.expanded[nav.node] = true
+		self:renderNode(sc, nav.node, idx, t, true)
+		return
+	end
+
+	-- SKILL: the nodes of a branch ----------------------------------------------------------------------------------------
+	local bar = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 2 })
+	Ui.list(bar, 6, true)
+	local function prompt(ptitle: string, initial: string, onOk: (string) -> ())
+		local pb = Ui.modal(ptitle, 360, 130)
+		local box = Ui.input(pb, initial, function() end, { ZIndex = 63, Size = UDim2.new(1, 0, 0, 30) })
+		Ui.button(pb, "OK", function()
+			local txt = box.Text
 			Ui.closePopup()
-			onOk(t)
+			onOk(txt)
 		end, { Position = UDim2.new(1, -60, 0, 40), ZIndex = 63, BackgroundColor3 = C.accent })
 		box:CaptureFocus()
 	end
-	Ui.button(bar, "+", function()
-		prompt("New branch", "", function(t)
-			self:newBranch(t)
-		end)
-	end, { Size = UDim2.fromOffset(30, 30), LayoutOrder = 3 })
-	Ui.button(bar, "Ren", function()
-		if self.branch ~= "Default" then
-			prompt("Rename branch", self.branch, function(t)
-				self:renameBranch(self.branch, t)
-			end)
+	local branchB
+	branchB = Ui.button(bar, "Branch: " .. self.branch .. " ▼", function()
+		local items = { { header = true, text = "BRANCHES" } }
+		for _, nm in ipairs(self:branchNames()) do
+			table.insert(items, { text = nm .. "  (" .. #self.skill.branches[nm] .. ")", color = nm == self.branch and C.accent or nil, onClick = function()
+				self.branch = nm
+				self.path = {}
+				self.selected = {}
+				self:render()
+			end })
 		end
-	end, { Size = UDim2.fromOffset(36, 30), LayoutOrder = 4, TextSize = 12 })
-	local del
-	del = Ui.button(bar, "Del", function()
-		if self.branch == "Default" then
-			return
+		if not self.readOnly then
+			table.insert(items, { header = true, text = "" })
+			table.insert(items, { text = "+ New branch", color = C.good, onClick = function()
+				prompt("New branch", "", function(txt)
+					self:newBranch(txt)
+				end)
+			end })
+			if self.branch ~= "Default" then
+				table.insert(items, { text = "Rename " .. self.branch, onClick = function()
+					prompt("Rename branch", self.branch, function(txt)
+						self:renameBranch(self.branch, txt)
+					end)
+				end })
+				table.insert(items, { text = "Delete " .. self.branch, color = C.bad, onClick = function()
+					self:confirm("Delete branch " .. self.branch .. "?", ("Its %d node(s) go too. Undo brings it back."):format(#(self.skill.branches[self.branch] or {})), "Delete", function()
+						self:deleteBranch(self.branch)
+					end)
+				end })
+			end
+			table.insert(items, { text = "See how branches connect (Flow)", onClick = function()
+				self:flowWindow()
+			end })
 		end
-		if del.Text == "sure?" then
-			self:deleteBranch(self.branch)
-		else
-			del.Text = "sure?"
-			del.Size = UDim2.fromOffset(52, 30)
-		end
-	end, { Size = UDim2.fromOffset(36, 30), LayoutOrder = 5, TextSize = 12 })
-
-	-- breadcrumb inside a Loop / Group
-	if #self.path > 0 then
-		local crumb = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 24), LayoutOrder = 2 })
-		Ui.button(crumb, "< back", function()
-			self:back()
-		end, { Size = UDim2.fromOffset(64, 24) })
-		local names = { self.branch }
-		for _, n in ipairs(self.path) do
-			table.insert(names, n.name or n.type)
-		end
-		Ui.text(crumb, table.concat(names, "  >  "), { Position = UDim2.fromOffset(72, 0), Size = UDim2.new(1, -72, 1, 0), TextColor3 = C.dim })
-	end
-
-	-- tool row: quick flow nodes, Add menu, edit tools
-	local tools = Ui.frame(left, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 62), LayoutOrder = 3 })
-	local r1 = Ui.frame(tools, { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 28) })
-	Ui.list(r1, 4, true)
-	local r2 = Ui.frame(tools, { BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 32), Size = UDim2.new(1, 0, 0, 28) })
-	Ui.list(r2, 4, true)
-	local TIPS = {
-		["+ Add ▼"] = "Add a node (by category) after the selected one",
-		Wait = "Add a Wait: pauses this branch",
-		Branch = "Add a Branch: runs another branch",
-		Loop = "Add a Loop: repeats the nodes inside it",
-		Multi = "Multi-select: click several cards",
-		["Multi: on"] = "Multi-select is on",
-		Copy = "Copy the selected nodes",
-		Paste = "Paste after the selected node",
-		Delete = "Delete the selected nodes (Undo brings them back)",
-		["▲"] = "Move the selected nodes up",
-		["▼"] = "Move the selected nodes down",
-		Group = "Group the selected nodes (or split a selected Group)",
-		["Expand all"] = "Open / close every card",
-	}
-	local function tool(row: Instance, text: string, order: number, fn: () -> (), color: Color3?)
-		local bt = Ui.button(row, text, fn, { LayoutOrder = order, Size = UDim2.fromOffset(#text * 7 + 16, 28), BackgroundColor3 = color or C.card, Font = Ui.FontBold })
-		if TIPS[text] then
-			Ui.tip(bt, TIPS[text])
-		end
-		return bt
-	end
+		Ui.menu(branchB.AbsolutePosition + Vector2.new(0, 32), items, 260)
+	end, { Size = UDim2.new(1, -150, 0, 30), LayoutOrder = 1, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd })
+	Ui.tip(branchB, "Switch branch, add, rename or delete one")
 	local addB
-	addB = tool(r1, "+ Add ▼", 1, function()
+	addB = Ui.button(bar, "+ Add ▼", function()
 		local items = {}
+		table.insert(items, { header = true, text = "QUICK" })
+		for _, t in ipairs({ "Wait", "Branch", "Loop" }) do
+			table.insert(items, { text = t .. "   ·  " .. (Meta.Describe[t] or ""), color = Meta.FlowColor, onClick = function()
+				self:insert(self:newNode(t))
+			end })
+		end
 		for _, cat in ipairs(Meta.Categories) do
 			table.insert(items, { header = true, text = string.upper(cat.name), color = cat.color })
 			for _, t in ipairs(cat.types) do
@@ -1593,83 +2044,55 @@ function App:renderLeft()
 			end
 		end
 		Ui.menu(addB.AbsolutePosition + Vector2.new(0, 32), items, 380)
-	end, C.accent)
-	tool(r1, "Wait", 2, function()
-		self:insert(self:newNode("Wait"))
-	end)
-	tool(r1, "Branch", 3, function()
-		self:insert(self:newNode("Branch"))
-	end)
-	tool(r1, "Loop", 4, function()
-		self:insert(self:newNode("Loop"))
-	end)
-	tool(r1, self.multi and "Multi: on" or "Multi", 5, function()
-		self.multi = not self.multi
-		self:renderLeft()
-	end, self.multi and C.accent or nil)
-	tool(r2, "Copy", 1, function()
-		self:copy()
-	end)
-	tool(r2, "Paste", 2, function()
-		self:paste()
-	end)
-	tool(r2, "Delete", 3, function()
-		self:delete()
-	end)
-	tool(r2, "▲", 4, function()
-		self:move(-1)
-	end)
-	tool(r2, "▼", 5, function()
-		self:move(1)
-	end)
-	tool(r2, "Group", 6, function()
-		self:group()
-	end)
-	tool(r2, "Expand all", 7, function()
-		local any = false
-		for _, n in ipairs(self:list()) do
-			if self.expanded[n] then
-				any = true
-				break
-			end
-		end
-		for _, n in ipairs(self:list()) do
-			self.expanded[n] = not any
-		end
-		self:renderLeft()
-	end)
+	end, { Size = UDim2.fromOffset(74, 30), LayoutOrder = 2, BackgroundColor3 = C.accent })
+	Ui.tip(addB, "Add a node after the selected one")
+	local editB
+	editB = Ui.button(bar, "Edit ▼", function()
+		local n = #self:selection()
+		local items = {
+			{ header = true, text = n > 0 and ("%d SELECTED"):format(n) or "SELECT NODES FIRST (TICK SEVERAL)" },
+			{ text = self.multi and "Select several: on" or "Select several: off", color = self.multi and C.good or nil, onClick = function()
+				self.multi = not self.multi
+				self:renderLeft()
+			end },
+			{ text = "Copy", onClick = function()
+				self:copy()
+			end },
+			{ text = "Paste", onClick = function()
+				self:paste()
+			end },
+			{ text = "Move up", onClick = function()
+				self:move(-1)
+			end },
+			{ text = "Move down", onClick = function()
+				self:move(1)
+			end },
+			{ text = "Group / ungroup", onClick = function()
+				self:group()
+			end },
+			{ text = "Delete", color = C.bad, onClick = function()
+				self:delete()
+			end },
+		}
+		Ui.menu(editB.AbsolutePosition + Vector2.new(0, 32), items, 240)
+	end, { Size = UDim2.fromOffset(64, 30), LayoutOrder = 3 })
+	Ui.tip(editB, "Copy, paste, move, group, delete; select several")
 
-	-- node list
-	local scroll = Instance.new("ScrollingFrame")
-	scroll.BackgroundTransparency = 1
-	scroll.BorderSizePixel = 0
-	scroll.Size = UDim2.new(1, 0, 1, -(30 + 62 + (#self.path > 0 and 30 or 0) + 18))
-	scroll.LayoutOrder = 4
-	scroll.ScrollBarThickness = 5
-	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scroll.CanvasSize = UDim2.new()
-	scroll.Parent = left
-	Ui.list(scroll, 5)
-	self.listFrame = scroll
+	local sc = body(36)
 	local list = self:list()
 	if #list == 0 then
-		Ui.text(scroll, "Empty. Press + Add (or Wait / Branch / Loop) to add a node.", { TextColor3 = C.dim, TextWrapped = true, Size = UDim2.new(1, -8, 0, 40) })
+		Ui.text(sc, "Empty. Press + Add to add a node.", { TextColor3 = C.dim, TextWrapped = true, Size = UDim2.new(1, -8, 0, 40) })
 	end
 	local t = 0
 	for i, node in ipairs(list) do
-		self:renderNode(scroll, node, i, t)
+		self:renderNode(sc, node, i, t)
 		if node.type == "Wait" then
 			t += node.time or 0
 		end
 	end
-	task.defer(function()
-		if scroll.Parent then
-			scroll.CanvasPosition = Vector2.new(0, scrollY)
-		end
-	end)
 end
 
-function App:renderNode(parent: Instance, node: any, index: number, startT: number)
+function App:renderNode(parent: Instance, node: any, index: number, startT: number, fullPage: boolean?)
 	local _, color = Meta.category(node.type)
 	local sel = self.selected[node] == true
 	local card = Ui.frame(parent, { Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = sel and C.cardHi or C.card, LayoutOrder = index })
@@ -1694,11 +2117,17 @@ function App:renderNode(parent: Instance, node: any, index: number, startT: numb
 	head.Size = UDim2.new(1, 0, 0, 26)
 	head.LayoutOrder = 0
 	head.Parent = inner
-	local expanded = self.expanded[node] == true
-	Ui.button(head, expanded and "▼" or "▶", function()
-		self.expanded[node] = not expanded
-		self:renderLeft()
-	end, { Size = UDim2.fromOffset(24, 24), Position = UDim2.fromOffset(0, 1), BackgroundColor3 = C.field, TextSize = 13 })
+	-- in a list a card is one line (click it to open the node's own page); on that page it shows every setting
+	local expanded = fullPage == true
+	if self.multi and not fullPage then
+		local tick = Ui.button(head, sel and "X" or "", function()
+			self.selected[node] = not self.selected[node] or nil
+			self:renderLeft()
+		end, { Size = UDim2.fromOffset(24, 24), Position = UDim2.fromOffset(0, 1), BackgroundColor3 = sel and C.accent or C.field, TextSize = 12 })
+		Ui.tip(tick, "Tick to select")
+	else
+		Ui.text(head, tostring(index), { Size = UDim2.fromOffset(24, 24), Position = UDim2.fromOffset(0, 1), TextXAlignment = Enum.TextXAlignment.Center, TextColor3 = C.dim, TextSize = 12 })
+	end
 	local badge = Ui.text(head, Meta.Badge[node.type] or "?", { Position = UDim2.fromOffset(30, 1), Size = UDim2.fromOffset(28, 24), BackgroundTransparency = 0, BackgroundColor3 = color, TextColor3 = Color3.new(0.05, 0.05, 0.08), Font = Ui.FontBold, TextXAlignment = Enum.TextXAlignment.Center })
 	Ui.corner(badge, 5)
 	local summary = node.type
@@ -1718,17 +2147,31 @@ function App:renderNode(parent: Instance, node: any, index: number, startT: numb
 		summary = ("%s · %d inside"):format(node.type, #(node.nodes or {}))
 	elseif node.type == "Tags" then
 		summary = ("Tags · %s %s"):format(node.op or "", node.tag or "")
+	elseif node.type == "Check" then
+		summary = "If " .. Meta.condsText(node.conds)
+	elseif node.type == "Heal" then
+		summary = ("Heal · %s%s"):format(Ui.fmt(node.amount or 0), node.percent and "%" or "")
+	elseif node.type == "Meter" then
+		summary = ("Meter · %s %s %s"):format(node.op or "Add", tostring(node.meter), Ui.fmt(node.value or 0))
+	elseif node.type == "Counter" then
+		summary = ("Counter · %ss"):format(Ui.fmt(node.time or 1))
 	end
-	Ui.input(head, node.name or "", function(t)
-		local v = t ~= "" and t or nil
-		if v ~= node.name then
-			node.name = v
-			self:changed()
-		end
-	end, { Position = UDim2.fromOffset(64, 1), Size = UDim2.new(1, -64 - 44 - 80, 0, 24), PlaceholderText = summary, BackgroundTransparency = 1, Font = Ui.FontBold })
+	if fullPage then
+		-- on its own page the name can be typed (it shows instead of the summary)
+		local nb = Ui.input(head, node.name or "", function(t)
+			local v = t ~= "" and t or nil
+			if v ~= node.name then
+				node.name = v
+				self:changed()
+			end
+		end, { Position = UDim2.fromOffset(64, 1), Size = UDim2.new(1, -64 - 44 - 80, 0, 24), PlaceholderText = summary .. "  (click to name it)", BackgroundTransparency = 1, Font = Ui.FontBold })
+		local _ = nb
+	else
+		Ui.text(head, node.name and (node.name .. "  ·  " .. summary) or summary, { Position = UDim2.fromOffset(64, 1), Size = UDim2.new(1, -64 - 44, 0, 24), Font = Ui.FontBold, TextTruncate = Enum.TextTruncate.AtEnd })
+	end
 	Ui.text(head, Ui.fmt(math.floor(startT * 100 + 0.5) / 100) .. "s", { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -4, 0, 1), Size = UDim2.fromOffset(40, 24), TextColor3 = C.dim, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Right })
 	-- quick actions: shown when the card is hovered or selected
-	local quick = Ui.frame(head, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -48, 0, 1), Size = UDim2.fromOffset(78, 24), BackgroundTransparency = 1, Visible = sel })
+	local quick = Ui.frame(head, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -48, 0, 1), Size = UDim2.fromOffset(78, 24), BackgroundColor3 = sel and C.cardHi or C.card, Visible = sel, ZIndex = 3 })
 	Ui.list(quick, 4, true)
 	local dupB = Ui.button(quick, "Dup", function()
 		self:duplicateNode(node)
@@ -1745,14 +2188,18 @@ function App:renderNode(parent: Instance, node: any, index: number, startT: numb
 		quick.Visible = self.selected[node] == true
 	end)
 	head.Activated:Connect(function()
+		if fullPage then
+			return
+		end
 		if self.multi then
 			self.selected[node] = not self.selected[node] or nil
-		else
-			local only = self.selected[node] and next(self.selected, next(self.selected)) == nil
-			self.selected = only and {} or { [node] = true }
+			self:renderLeft()
+			return
 		end
-		self:renderLeft()
-		self:renderTimeline()
+		-- open the node's own page (◀ ▶ there step through this list)
+		self.selected = { [node] = true }
+		self:go({ level = "node", node = node, parent = self.nav })
+		self.selected = { [node] = true }
 	end)
 	if not expanded then
 		return
@@ -1970,6 +2417,65 @@ function App:renderField(parent: Instance, node: any, field: any, order: number)
 				end, { Position = UDim2.fromOffset(136, i * 28), Size = UDim2.new(1, -136, 0, 26) })
 			end
 		end
+	elseif kind == "conds" then
+		-- a list of conditions: what, not, value / meter, remove
+		local conds = type(v) == "table" and v or {}
+		Ui.button(slot, "+ condition", function()
+			table.insert(conds, { what = "InAir" })
+			set(conds)
+		end, { Size = UDim2.fromOffset(110, 24), BackgroundColor3 = C.cardHi })
+		row.Size = UDim2.new(1, 0, 0, 26 + #conds * 28)
+		local WHATS = { "InAir", "Jumping", "Holding", "Aiming", "Health", "Meter" }
+		for i, c in ipairs(conds) do
+			local y = i * 28
+			local line = Ui.frame(row, { BackgroundTransparency = 1, Position = UDim2.fromOffset(12, y), Size = UDim2.new(1, -12, 0, 26) })
+			local whatB
+			whatB = Ui.button(line, (c.what or "InAir") .. " ▼", function()
+				local items = {}
+				for _, w in ipairs(WHATS) do
+					table.insert(items, { text = w, onClick = function()
+						c.what = w
+						if w == "Health" then
+							c.value = c.value or 0.5
+						elseif w == "Meter" then
+							c.meter = c.meter or "awakening"
+							c.value = c.value or 1
+						end
+						set(conds)
+					end })
+				end
+				Ui.menu(whatB.AbsolutePosition + Vector2.new(0, 28), items, 160)
+			end, { Size = UDim2.fromOffset(96, 24), Font = Ui.Font, TextSize = 13, BackgroundColor3 = C.field })
+			Ui.tip(whatB, "InAir, Jumping, Holding the key, Aiming at someone, Health (fraction of max), Meter")
+			local notB = Ui.toggle(line, c["not"] == true, function(on)
+				c["not"] = on or nil
+				set(conds)
+			end, { Position = UDim2.fromOffset(100, 0), Size = UDim2.fromOffset(44, 24) })
+			notB.Text = c["not"] and "NOT" or "is"
+			Ui.tip(notB, "Invert this condition")
+			local x = 148
+			if c.what == "Meter" then
+				Ui.input(line, tostring(c.meter or ""), function(t)
+					c.meter = t ~= "" and t or "awakening"
+					set(conds)
+				end, { Position = UDim2.fromOffset(x, 0), Size = UDim2.fromOffset(84, 24), PlaceholderText = "meter" })
+				x += 88
+			end
+			if c.what == "Health" or c.what == "Meter" then
+				Ui.text(line, ">=", { Position = UDim2.fromOffset(x, 0), Size = UDim2.fromOffset(18, 24), TextColor3 = C.dim, TextSize = 12 })
+				Ui.input(line, Ui.fmt(c.value or 0), function(t)
+					local n = tonumber(t)
+					if n then
+						c.value = n
+						set(conds)
+					end
+				end, { Position = UDim2.fromOffset(x + 20, 0), Size = UDim2.fromOffset(46, 24) })
+			end
+			Ui.button(line, "X", function()
+				table.remove(conds, i)
+				set(conds)
+			end, { AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.fromOffset(24, 24), TextSize = 12, BackgroundColor3 = C.field, TextColor3 = C.bad })
+		end
 	elseif kind == "nodes" then
 		Ui.button(slot, ("Open inner nodes (%d) >"):format(#(node.nodes or {})), function()
 			self:openInner(node)
@@ -2046,12 +2552,8 @@ function App:renderTimeline()
 		hit.Size = UDim2.fromScale(1, 1)
 		hit.Parent = row
 		hit.Activated:Connect(function()
-			self.selected = { [n] = true }
-			self.expanded[n] = true
-			self.leftMode = "nodes"
-			self:renderLeft()
-			self:renderTimeline()
-			self:scrollTo(n)
+			-- open that node's page
+			self:jumpTo(self.branch, self.path, n)
 		end)
 	end
 	-- playhead

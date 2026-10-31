@@ -35,9 +35,30 @@ local function modelOf(inst: Instance?): Model?
 	return Rig.modelOf(inst)
 end
 
--- HIT: blocking, damage multipliers, knockback, ragdoll, last hit, log ---------------------------------------------
+-- open counter windows: victim -> { cast, node, cursor, untilTime }
+local counters: { [Model]: any } = setmetatable({}, { __mode = "k" }) :: any
+Nodes.counters = counters
+
+-- HIT: counters, blocking, damage multipliers, knockback, ragdoll, last hit, log -----------------------------------
 function Nodes.hit(cast: any, victim: Model, n: any, from: CFrame): (boolean, boolean)
 	local adapter = cast.adapter
+	local c = counters[victim]
+	if c and c.cast.alive and os.clock() < c.untilTime and cast.user ~= victim then
+		-- countered: the hit does nothing, the attacker is stunned and becomes the counter's last hit
+		if c.node.removeOnHit ~= false then
+			counters[victim] = nil
+		end
+		local attacker = cast.user
+		c.cast.lastHit = attacker
+		table.insert(c.cast.hits, attacker)
+		if (c.node.stun or 0) > 0 then
+			StateStore.apply(attacker, { category = "Disable", sub = { "Movement", "Jump", "Skill" }, duration = c.node.stun })
+		end
+		cast:log(n, "info", ("countered by %s"):format(victim.Name), { code = "countered" })
+		c.cast:log(c.node, "info", ("countered %s"):format(attacker.Name))
+		c.cast:branch(c.node.counterBranch, c.node.mode, c.cursor, c.node)
+		return false, true
+	end
 	if n.blockable ~= false and adapter.isBlocking(victim) and (n.block360 or Hitbox.facing(victim, from.Position)) then
 		if n.blockCancel then
 			adapter.breakBlock(victim)
@@ -670,6 +691,118 @@ H.PresetVFX = vfx("PresetVFX")
 H.Particle = vfx("Particle")
 H.MeshVisual = vfx("MeshVisual")
 H.Highlight = vfx("Highlight")
+
+-- CONDITIONS, COUNTERS, HEALTH, METERS ----------------------------------------------------------------------------
+local function condition(cast: any, subject: Model, c: any): (boolean, string)
+	local what = c.what or "InAir"
+	local pass: boolean
+	local detail = ""
+	if what == "InAir" or what == "Jumping" then
+		local hum = Rig.humanoid(subject)
+		local state = hum and hum:GetState()
+		if what == "InAir" then
+			pass = hum ~= nil and (hum.FloorMaterial == Enum.Material.Air or state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping)
+		else
+			pass = hum ~= nil and (state == Enum.HumanoidStateType.Jumping or (hum.Jump == true))
+		end
+	elseif what == "Holding" then
+		pass = cast.adapter.isHolding(subject, cast) == true
+	elseif what == "Aiming" then
+		local t = cast.adapter.aimTarget(subject, cast)
+		pass = t ~= nil
+		if t and subject == cast.user then
+			cast.target = t
+			detail = " at " .. t.Name
+		end
+	elseif what == "Health" then
+		local hum = Rig.humanoid(subject)
+		local frac = hum and hum.MaxHealth > 0 and hum.Health / hum.MaxHealth or 0
+		pass = frac >= (c.value or 0.5)
+		detail = (" %.0f%%"):format(frac * 100)
+	elseif what == "Meter" then
+		local v = cast.adapter.getMeter(subject, c.meter or "awakening") or 0
+		pass = v >= (c.value or 1)
+		detail = (" %s=%s"):format(tostring(c.meter), tostring(v))
+	else
+		pass = false
+		detail = " (unknown condition)"
+	end
+	if c["not"] then
+		pass = not pass
+	end
+	return pass, ((c["not"] and "not " or "") .. what .. detail)
+end
+Nodes.condition = condition
+
+H.Check = function(cast, n, cursor)
+	local subject = modelOf(cast:resolve(n.subject))
+	if not subject then
+		cast:log(n, "warn", "no subject to check")
+		return
+	end
+	local all, parts = true, {}
+	for _, c in ipairs(n.conds or {}) do
+		local ok, text = condition(cast, subject, c)
+		table.insert(parts, text .. (ok and " ✓" or " ✗"))
+		if not ok then
+			all = false
+		end
+	end
+	cast:log(n, "info", ("check %s -> %s"):format(table.concat(parts, ", "), all and "passed" or "failed"))
+	if all then
+		cast:branch(n.passBranch, n.mode, cursor, n)
+	elseif n.failBranch then
+		cast:branch(n.failBranch, n.mode, cursor, n)
+	elseif n.stopOnFail then
+		cursor.stopped = true
+	end
+end
+
+H.Counter = function(cast, n, cursor)
+	local subject = modelOf(cast:resolve(n.subject))
+	if not subject then
+		return
+	end
+	local entry = { cast = cast, node = n, cursor = cursor, untilTime = os.clock() + (n.time or 1) }
+	counters[subject] = entry
+	cast:log(n, "info", ("counter window %.2fs on %s"):format(n.time or 1, subject.Name))
+	cast:spawn(function()
+		cast:wait(n.time or 1)
+		if counters[subject] == entry then
+			counters[subject] = nil
+		end
+	end)
+	cast:onCleanup(function()
+		if counters[subject] == entry then
+			counters[subject] = nil
+		end
+	end)
+end
+
+H.Heal = function(cast, n, cursor)
+	local subject = modelOf(cast:resolve(n.subject))
+	if not subject then
+		return
+	end
+	local amount = n.amount or 10
+	if n.percent then
+		local hum = Rig.humanoid(subject)
+		amount = hum and hum.MaxHealth * amount / 100 or 0
+	end
+	cast.adapter.heal(subject, amount)
+	cast:log(n, "info", ("healed %s for %.1f"):format(subject.Name, amount))
+end
+
+H.Meter = function(cast, n, cursor)
+	local subject = modelOf(cast:resolve(n.subject))
+	if not subject then
+		return
+	end
+	local before = cast.adapter.getMeter(subject, n.meter) or 0
+	local v = n.op == "Set" and (n.value or 0) or before + (n.op == "Subtract" and -(n.value or 0) or (n.value or 0))
+	cast.adapter.setMeter(subject, n.meter, v)
+	cast:log(n, "info", ("meter %s on %s: %s -> %s"):format(tostring(n.meter), subject.Name, tostring(before), tostring(v)))
+end
 
 -- curves used by visuals are evaluated on clients; register custom ones on both sides (Registry / Curves.register)
 Nodes.Curves = Curves

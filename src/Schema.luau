@@ -12,8 +12,8 @@ local Schema = {}
 Schema.Version = 1
 
 Schema.Categories = {
-	Flow = { "Wait", "Branch", "Loop", "Group", "Tags", "State" },
-	Combat = { "Hitbox", "Projectile", "Grab", "Debris" },
+	Flow = { "Wait", "Branch", "Loop", "Group", "Tags", "State", "Check", "Heal", "Meter" },
+	Combat = { "Hitbox", "Projectile", "Grab", "Debris", "Counter" },
 	Motion = { "Velocity", "Travel", "Teleport" },
 	Animation = { "Animation", "Keyframes" },
 	Audio = { "Sound" },
@@ -212,6 +212,24 @@ Schema.Defaults = {
 		colorCurve = nil,
 		visualTag = nil,
 	},
+	-- Check: every condition in `conds` must pass (each can be inverted with `not = true`).
+	--   what: InAir | Jumping | Holding (the skill key is held) | Aiming (the mouse is on a valid target; it becomes
+	--   the cast's target) | Health (fraction of max health, compared with `value`) | Meter (a game meter, `meter`)
+	Check = {
+		subject = "user",
+		conds = { { what = "InAir" } },
+		passBranch = nil,
+		failBranch = nil,
+		stopOnFail = false, -- leave the current branch when the check fails (and there's no failBranch)
+		mode = "Switch",
+	},
+	-- Counter: for `time` seconds, a hit on the subject is cancelled; the attacker becomes the last hit, is stunned
+	-- for `stun`, and `counterBranch` runs
+	Counter = { subject = "user", time = 1, stun = 1, counterBranch = nil, removeOnHit = true, mode = "Switch" },
+	Heal = { subject = "user", amount = 10, percent = false },
+	-- Meter: a named game meter (awakening, evasion, ...). The game's adapter decides what it is; by default it's an
+	-- attribute "SK_Meter_<name>" on the model
+	Meter = { subject = "user", meter = "awakening", op = "Add", value = 5 },
 	Highlight = { subject = "user", applyTo = nil, fill = Color3.fromRGB(255, 220, 160), outline = Color3.new(1, 1, 1), fillTransparency = 0.5, outlineTransparency = 0, duration = 0.5, fadeCurve = nil },
 }
 
@@ -252,7 +270,7 @@ local function normalizeList(list: { any }, errors: { string }, branches: { [str
 			end
 		end
 		node.id = node.id or nextId()
-		for _, field in ipairs({ "target", "victimBranch", "finisherBranch", "missBranch", "hitBranch", "expireBranch", "passBranch", "failBranch", "arriveBranch", "grabBranch" }) do
+		for _, field in ipairs({ "target", "victimBranch", "finisherBranch", "missBranch", "hitBranch", "expireBranch", "passBranch", "failBranch", "arriveBranch", "grabBranch", "counterBranch" }) do
 			local b = node[field]
 			if type(b) == "string" and b ~= "" and not branches[b] and not (node.type == "Travel" and field == "target") then
 				table.insert(errors, ("%s[%d] %s (%s): no branch named %q"):format(path, i, node.type, node.id, b))

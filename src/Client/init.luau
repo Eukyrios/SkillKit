@@ -227,7 +227,37 @@ function Client.init()
 			end
 		end
 	end)
+	-- what the mouse points at (for Check "Aiming"): sent only when it changes
+	local Players = game:GetService("Players")
+	local lp = Players.LocalPlayer
+	if lp then
+		local mouse = lp:GetMouse()
+		local last: Model? = nil
+		task.spawn(function()
+			while true do
+				task.wait(0.15)
+				-- the nearest ancestor model with a Humanoid
+				local inst: Instance? = mouse.Target
+				while inst and not (inst:IsA("Model") and inst:FindFirstChildOfClass("Humanoid")) do
+					inst = inst.Parent
+				end
+				local m = inst :: Model?
+				if m == lp.Character then
+					m = nil
+				end
+				if m ~= last then
+					last = m
+					Net.remote():FireServer("Aim", m)
+				end
+			end
+		end)
+	end
 	return Client
+end
+
+-- tell the server whether the skill key is held (Check "Holding"). The game calls this from its input code.
+function Client.setHolding(holding: boolean)
+	Net.remote():FireServer("Holding", holding == true)
 end
 
 return Client

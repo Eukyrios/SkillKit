@@ -38,6 +38,8 @@ Tree.LINKS = {
 	Hitbox = { { "victimBranch", "hit" }, { "finisherBranch", "finisher" }, { "missBranch", "miss" } },
 	Projectile = { { "hitBranch", "hit" }, { "expireBranch", "expire" } },
 	Tags = { { "passBranch", "pass" }, { "failBranch", "fail" } },
+	Check = { { "passBranch", "pass" }, { "failBranch", "fail" } },
+	Counter = { { "counterBranch", "hit" } },
 	Travel = { { "arriveBranch", "arrive" } },
 	Grab = { { "grabBranch", "grab" }, { "missBranch", "miss" } },
 }
@@ -268,6 +270,14 @@ function Tree.summary(n: any): string
 		return "Sound " .. tostring(n.sound or "")
 	elseif t == "PresetVFX" then
 		return "VFX " .. tostring(n.preset or "")
+	elseif t == "Check" then
+		return "If " .. Meta.condsText(n.conds)
+	elseif t == "Counter" then
+		return ("Counter %ss"):format(Ui.fmt(n.time or 1))
+	elseif t == "Heal" then
+		return ("Heal %s%s"):format(Ui.fmt(n.amount or 0), n.percent and "%" or "")
+	elseif t == "Meter" then
+		return ("Meter %s %s %s"):format(n.op or "Add", tostring(n.meter), Ui.fmt(n.value or 0))
 	elseif t == "Tags" then
 		return ("Tags %s %s"):format(n.op or "Add", tostring(n.tag or ""))
 	elseif t == "State" then
@@ -370,6 +380,15 @@ function Tree.render(app: any, panel: Frame)
 			x += 24
 		end
 		local rightW = opts.rightW or 0
+		if opts.delete then
+			local d = opts.delete
+			local x = Ui.button(r, "X", function()
+				app:confirm(d.title or ("Delete " .. text .. "?"), d.message or "", d.yes or "Delete", d.run)
+			end, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(20, 18), TextSize = 11, BackgroundColor3 = C.panel, TextColor3 = C.bad })
+			Ui.tip(x, d.tip or "Delete")
+			r:SetAttribute("RightUsed", 24)
+			rightW += 24
+		end
 		Ui.text(r, text, {
 			Position = UDim2.fromOffset(x, 0),
 			Size = UDim2.new(1, -x - rightW - 2, 1, 0),
@@ -389,7 +408,8 @@ function Tree.render(app: any, panel: Frame)
 	local function smallButtons(r: Instance, list: { any })
 		for i, bt in ipairs(list) do
 			local w = math.max(22, #bt.text * 7 + 8)
-			local b = Ui.button(r, bt.text, bt.onClick, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -(i - 1) * (w + 4), 0.5, 0), Size = UDim2.fromOffset(w, 18), TextSize = 12, BackgroundColor3 = C.card })
+			local used = r:GetAttribute("RightUsed") or 0
+			local b = Ui.button(r, bt.text, bt.onClick, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -used - (i - 1) * (w + 4), 0.5, 0), Size = UDim2.fromOffset(w, 18), TextSize = 12, BackgroundColor3 = C.card })
 			if bt.tip then
 				Ui.tip(b, bt.tip)
 			end
@@ -406,6 +426,14 @@ function Tree.render(app: any, panel: Frame)
 				selected = current,
 				dot = #list == 0 and Meta.FlowColor or nil,
 				tip = "Open this branch in the node view",
+				delete = (bname ~= "Default" and not app.readOnly) and {
+					title = "Delete branch " .. bname .. "?",
+					message = ("Its %d node(s) go too. Nodes that point to it will point to nothing. Undo brings it back."):format(#list),
+					tip = "Delete this branch",
+					run = function()
+						app:deleteBranch(bname)
+					end,
+				} or nil,
 				onClick = function()
 					app.branch = bname
 					app.path = {}
@@ -416,7 +444,7 @@ function Tree.render(app: any, panel: Frame)
 			})
 			if open then
 				local function walk(nodes: { any }, depth: number, chain: { any })
-					for _, n in ipairs(nodes) do
+					for _, n in ipairs(table.clone(nodes)) do
 						local _, color = Meta.category(n.type)
 						local hasKids = type(n.nodes) == "table" and #n.nodes > 0
 						local _, kidsOpen = row(depth, Tree.summary(n), {
@@ -425,6 +453,19 @@ function Tree.render(app: any, panel: Frame)
 							color = color,
 							selected = app.selected[n] and app.branch == bname,
 							tip = "Edit this node",
+							delete = not app.readOnly and {
+								title = "Delete this node?",
+								message = Tree.summary(n) .. (type(n.nodes) == "table" and #n.nodes > 0 and ("  (and the %d node(s) inside it)"):format(#n.nodes) or "") .. ". Undo brings it back.",
+								tip = "Delete this node",
+								run = function()
+									local i = table.find(nodes, n)
+									if i then
+										table.remove(nodes, i)
+										app.selected[n] = nil
+										app:changed()
+									end
+								end,
+							} or nil,
 							onClick = function()
 								app:jumpTo(bname, chain, n)
 							end,
@@ -451,13 +492,16 @@ function Tree.render(app: any, panel: Frame)
 			selected = here,
 			rightW = opts.buttons and 26 or 0,
 			tip = opts.tip or "Open this skill",
+			delete = opts.delete,
 			onClick = function()
-				if here then
-					app.leftMode = "nodes"
-					app:render()
-				else
+				-- open the skill straight into the node view (its Default branch); ▶ browses it in the tree instead
+				if not here then
 					opts.open()
 				end
+				app.branch = "Default"
+				app.path = {}
+				app.leftMode = "nodes"
+				app:render()
 			end,
 		})
 		smallButtons(r, opts.buttons or {})
@@ -477,6 +521,14 @@ function Tree.render(app: any, panel: Frame)
 			expand = { "c:" .. tostring(def.id), holdsOpen },
 			bold = true,
 			tip = "Name, stats and keybinds",
+			delete = {
+				title = "Delete character " .. tostring(def.name or def.id) .. "?",
+				message = "The character goes; its skills are kept (they move to Skills (no character)). Ctrl+Z in Studio brings it back.",
+				tip = "Delete this character",
+				run = function()
+					app:deleteCharacter(entry)
+				end,
+			},
 			onClick = function()
 				app:characterWindow(entry)
 			end,
@@ -495,6 +547,15 @@ function Tree.render(app: any, panel: Frame)
 				if skillName then
 					skillRow(1, slot .. keyText .. "  ·  " .. skillName, holdsOpen and app.slotCtx.slot == slot, {
 						buttons = menu,
+						delete = {
+							title = "Empty slot " .. slot .. "?",
+							message = skillName .. " is taken out of the slot; the skill itself is kept (in Skills (no character)).",
+							yes = "Empty the slot",
+							tip = "Take the skill out of this slot",
+							run = function()
+								app:assignSlot(entry, slot, nil)
+							end,
+						},
 						open = function()
 							app:openSlot(entry, slot)
 						end,
@@ -544,7 +605,14 @@ function Tree.render(app: any, panel: Frame)
 				skillRow(1, tostring(app.skill.name) .. "  (not saved)", true, { open = function() end })
 			end
 			for _, m in ipairs(loose) do
-				skillRow(1, m.Name, app.source == m, { dot = C.accent, open = function()
+				skillRow(1, m.Name, app.source == m, { dot = C.accent, delete = {
+					title = "Delete skill " .. m.Name .. "?",
+					message = "Removes ReplicatedStorage.SkillKitSkills." .. m.Name .. ". Ctrl+Z in Studio brings it back.",
+					tip = "Delete this skill",
+					run = function()
+						app:deleteSkillModule(m)
+					end,
+				}, open = function()
 					local sk, err = freshRequire(m)
 					if type(sk) == "table" then
 						app:load(sk, m, nil, false)

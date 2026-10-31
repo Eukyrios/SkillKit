@@ -220,4 +220,40 @@ return {
 			{ type = "Wait", time = 0.6 },
 		},
 	},
+	Check = {
+		name = "Test Check",
+		branches = {
+			Default = {
+				-- on the ground at full health: Grounded runs; in the air it would be Aerial
+				{ type = "Check", conds = { { what = "InAir" } }, passBranch = "Aerial", mode = "Switch" },
+				{ type = "Check", conds = { { what = "Health", value = 0.5 }, { what = "InAir", ["not"] = true } }, passBranch = "Grounded", failBranch = "Hurt", mode = "Switch" },
+			},
+			Aerial = { { type = "Keyframes", anim = "blast" }, { type = "Wait", time = 0.3 } },
+			Grounded = { { type = "Keyframes", anim = "punch" }, { type = "Hitbox", size = V(6, 6, 10), position = V(0, 0, 6), damage = 2 }, { type = "Wait", time = 0.3 } },
+			Hurt = { { type = "Keyframes", anim = "back_dash" }, { type = "Wait", time = 0.3 } },
+		},
+	},
+	Counter = {
+		name = "Test Counter",
+		branches = {
+			Default = {
+				{ type = "Keyframes", anim = "block" },
+				{ type = "Counter", time = 0.8, stun = 1, counterBranch = "Punish" },
+				{ type = "Wait", time = 0.8 },
+			},
+			Punish = { { type = "Keyframes", anim = "slash_right" }, { type = "Hitbox", size = V(6, 6, 10), position = V(0, 0, 6), damage = 12, knockback = V(0, 10, 30) }, { type = "Wait", time = 0.3 } },
+		},
+	},
+	Heal = {
+		name = "Test Heal and Meter",
+		branches = {
+			Default = {
+				{ type = "Heal", amount = 20 },
+				{ type = "Meter", meter = "awakening", op = "Add", value = 25 },
+				{ type = "Check", conds = { { what = "Meter", meter = "awakening", value = 25 } }, passBranch = "Ready", mode = "Continue" },
+				{ type = "Wait", time = 0.2 },
+			},
+			Ready = { { type = "PresetVFX", preset = "glow", color = "#ffd27a" } },
+		},
+	},
 }
