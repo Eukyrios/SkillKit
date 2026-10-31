@@ -1,0 +1,6 @@
+plugin/build/
+*.rbxl
+*.rbxlx
+*.lock
+sourcemap.json
+Packages/

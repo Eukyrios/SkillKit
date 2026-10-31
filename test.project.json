@@ -1,0 +1,25 @@
+{
+  "name": "SkillKitTest",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "SkillKit": { "$path": "src" }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "SkillKitTest": { "$path": "test/TestRunner.server.luau" }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "SkillKitTestClient": { "$path": "test/TestClient.client.luau" }
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "$ignoreUnknownInstances": true
+    }
+  }
+}

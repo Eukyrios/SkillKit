@@ -1,0 +1,6 @@
+[package]
+name = "eukyrios/skillkit"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+description = "Runtime for node-based skills (hitboxes, motion, animation, VFX, tags, states), with a Studio skill editor plugin."
